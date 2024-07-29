@@ -1,3 +1,5 @@
 data/raw/mfp-diaries.tsv
 data/processed/myfitnesspal_goals.csv
 data/processed/myfintesspal_meals.csv
+data/userAnalysis/user4920/nutrientBoxplot.png
+data/userAnalysis/user4920/nutrientTrends.png
