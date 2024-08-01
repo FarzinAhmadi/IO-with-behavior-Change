@@ -191,7 +191,7 @@ def init_user(userID, userGoals, userMeals, print_stats=False):
     (basepath/''.join(["data/userAnalysis/user",str(userID)])).mkdir(exist_ok=True, parents=True)
 
     if print_stats==True:
-        print("User", str(userID), "has", len(userGoals), "daily entries with", len(userMeals["description"].unique()), "total unique food items")
+        print("User", str(userID), "has", len(userGoals), "daily entries with", len(userMeals["full_name"].unique()), "total unique food items")
 
     diet_df = pd.DataFrame({'Calories': userGoals.calories/userGoals.goal_calories, 'Sodium': userGoals.sodium/userGoals.goal_sodium,
                             'Carbs': userGoals.carbs/userGoals.goal_carbs, 'Fat': userGoals.fat/userGoals.goal_fat, 
@@ -247,7 +247,7 @@ def model_params(goals_df, meals_df, dates, UB_flex, LB_flex):
     AT = meals_df.drop(columns=['user_id', 'date', 'food_name', 'brand', 'flavor', 'serving_size'])
     AT = AT.drop_duplicates(subset=["full_name"]); AT = AT.drop(columns='full_name')
     print(AT.shape[0], "unique foods) eaten in date range.")
-    AT = AT[['calories', 'carbs', 'fat', 'protein', 'sodium']]
+    AT = AT[['calories', 'carbs', 'fat', 'protein', 'sodium', 'sugar']]
     AT = AT.astype('float').to_numpy()
     AT  = np.column_stack((AT, -AT))
     A = AT.T; A = np.nan_to_num(A)
@@ -441,3 +441,92 @@ def IO_M(A,b,x,myEnv,noiseType, diffType="None", diff =-999999, e_x_abs_max=-999
             return {'feasible': True, 'obj': mod.ObjVal, 'c': c_vals, 'y': y_vals, 'x_bar': x_bar_vals, 'e_x': e_x_vals,
                     'A_bar': A_bar_vals, 'e_A': e_A_vals, 'b_bar': b_bar_vals, 'e_b': e_b_vals, 'rt': mod.Runtime}
         else: print(mod.status); return {'feasible': False} 
+
+# Plot nutritional changes in recommendation vs observation
+def plt_rec_nuts(userID, userGoals, dates, A, b, X, d, day_ind, all_results, model_names):
+    # Create the bar plot and set up formatting
+    plt.figure(figsize=(12, 6)); plt.grid(visible=True, axis='y'); plt.rcParams['font.size'] = 6
+    plt.rcParams.update({'font.size': 10})
+    # Set the width of each bar
+    bar_width = 0.25
+
+    # Set the positions of the bars on the x-axis
+    # TODO: Un-hard-code this to work for flexible number of models to compare
+    nutrients = ["Calories", "Carbs", "Fat", "Protein", "Sodium", "Sugar"]
+    r2 = range(len(nutrients))
+    r1 = [x - bar_width for x in r2]
+    r3 = [x + bar_width for x in r2]
+
+    positions = [r1, r2, r3]
+    print(positions[0])
+    print(positions[1])
+    print(positions[-1])
+
+    # Get actual original behavior amounts
+    obs_cals = gp.quicksum(X[d,i]*A[0,i] for i in range(X.shape[1])).getValue()
+    goal_cals = userGoals.iloc[day_ind]["goal_calories"]
+    obs_carbs = gp.quicksum(X[d,i]*A[1,i] for i in range(X.shape[1])).getValue()
+    goal_carbs = userGoals.iloc[day_ind]["goal_carbs"]
+    obs_fat = gp.quicksum(X[d,i]*A[2,i] for i in range(X.shape[1])).getValue()
+    goal_fat = userGoals.iloc[day_ind]["goal_fat"]
+    obs_protein = gp.quicksum(X[d,i]*A[3,i] for i in range(X.shape[1])).getValue()
+    goal_protein = userGoals.iloc[day_ind]["goal_protein"]
+    obs_sodium = gp.quicksum(X[d,i]*A[4,i] for i in range(X.shape[1])).getValue()
+    goal_sodium = userGoals.iloc[day_ind]["goal_sodium"]
+    obs_sugar = gp.quicksum(X[d,i]*A[5,i] for i in range(X.shape[1])).getValue()
+    goal_sugar = userGoals.iloc[day_ind]["goal_sugar"]
+    obs_df = pd.DataFrame({"Day": d, "Calories": obs_cals, "Carbs": obs_carbs, "Fat": obs_fat, "Protein": obs_protein, "Sodium": obs_sodium, "Sugar": obs_sugar}, index=[0])
+    goals_df = pd.DataFrame({"Day": d, "Calories": goal_cals, "Carbs": goal_carbs, "Fat": goal_fat, "Protein": goal_protein, "Sodium": goal_sodium, "Sugar": goal_sugar}, index=[0])
+    # Plot bars for original behavior
+    container = plt.bar(positions[0], 100*(obs_df.iloc[0,1:] - goals_df.iloc[0,1:])/goals_df.iloc[0,1:], width=bar_width, label='Original Behavior', color="cornflowerblue")
+    plt.bar_label(container, labels=obs_df.iloc[0,1:].astype(int))
+
+    # Get recommended amounts for each model:
+    for m in range(len(all_results)):
+        rec_cals = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,0,j]) for j in range(X.shape[1])).getValue()
+        rec_carbs = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,1,j]) for j in range(X.shape[1])).getValue()
+        rec_fat = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,2,j]) for j in range(X.shape[1])).getValue()
+        rec_protein = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,3,j]) for j in range(X.shape[1])).getValue()
+        rec_sodium = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,4,j]) for j in range(X.shape[1])).getValue()
+        rec_sugar = gp.quicksum(all_results[m]['x_bar'][d,j]*(all_results[m]['A_bar'][0,5,j]) for j in range(X.shape[1])).getValue()
+        recs_df = pd.DataFrame({"Day": d, "Calories": rec_cals, "Carbs": rec_carbs, "Fat": rec_fat, "Protein": rec_protein, "Sodium": rec_sodium, "Sugar": rec_sugar}, index=[0])
+        # Plot recommendation amounts for each model
+        container = plt.bar(positions[m+1], 100*(recs_df.iloc[0,1:] - goals_df.iloc[0,1:])/goals_df.iloc[0,1:], width=bar_width, label=model_names[m])
+        plt.bar_label(container, labels=recs_df.iloc[0,1:].astype(int))
+
+    # Define the acceptable range for each nutrient
+    day_goals = userGoals[userGoals.date.isin(dates)].iloc[0]
+    acceptable_ranges = {
+        'Calories': (100*(-b[6] - day_goals['goal_calories'])/day_goals['goal_calories'], 
+                     100*(b[0] - day_goals['goal_calories'])/day_goals['goal_calories']),
+        'Carbs': (100*(-b[7] - day_goals['goal_carbs'])/day_goals['goal_carbs'], 
+                  100*(b[1] - day_goals['goal_carbs'])/day_goals['goal_carbs']),
+        'Fat': (100*(-b[8] - day_goals['goal_fat'])/day_goals['goal_fat'], 
+                100*(b[2] - day_goals['goal_fat'])/day_goals['goal_fat']),
+        'Protein': (100*(-b[9] - day_goals['goal_protein'])/day_goals['goal_protein'], 
+                    100*(b[3] - day_goals['goal_protein'])/day_goals['goal_protein']),
+        'Sodium': (100*(-b[10] - day_goals['goal_sodium'])/day_goals['goal_sodium'], 
+                   100*(b[4] - day_goals['goal_sodium'])/day_goals['goal_sodium']),
+        'Sugar': (100*(-b[11] - day_goals['goal_sugar'])/day_goals['goal_sugar'], 
+                  100*(b[5] - day_goals['goal_sugar'])/day_goals['goal_sugar'])}
+
+    # Add green bands for acceptable ranges
+    nutrient_goals = []
+    for i, nutrient in enumerate(nutrients):
+        if np.isnan(goals_df.iloc[0][nutrient]): nutrient_goals.append("None")
+        else: nutrient_goals.append(str(round(goals_df.iloc[0][nutrient])))
+        lower_bound, upper_bound = acceptable_ranges[nutrient]
+        print(positions[0][i]); print(positions[1][i])
+        plt.axhspan(lower_bound, upper_bound, facecolor='g', alpha=0.2, xmin=i / len(nutrients), xmax=(i + 1) / len(nutrients))
+
+    # Add labels and title
+    plt.xlabel('Nutrients')
+    plt.ylabel('Difference from goal (%)')
+    plt.title('Day '+ str(d+1) +' Nutrient Recommendations Results')
+    nutrient_labels = ["Calories ("+nutrient_goals[0]+")", "Carbs ("+nutrient_goals[1]+")", "Fat ("+nutrient_goals[2]+")", 
+                       "Protein ("+nutrient_goals[3]+")", "Sodium ("+nutrient_goals[4]+")", "Sugar ("+nutrient_goals[5]+")"]
+    plt.xticks([r  for r in range(len(nutrients))], nutrient_labels); # plt.tick_params(axis='x', labelsize=12)
+    plt.legend(bbox_to_anchor=(0.75, 1.15), loc="upper left")
+    plt.savefig("data/User"+str(userID)+"_Day_"+str(d+1)+"_Nutrients.png")
+    
+    # plt.close()
