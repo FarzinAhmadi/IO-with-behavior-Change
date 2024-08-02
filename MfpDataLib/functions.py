@@ -8,9 +8,13 @@ import seaborn as sns
 from datetime import datetime
 import gurobipy as gp
 from gurobipy import GRB
+from scipy.signal import find_peaks
+from tqdm import tqdm
 
 from pathlib import Path
 basepath = Path(__file__).parent.parent
+
+#### Data Processing ####
 
 def process_myfitnesspal():
 	(basepath/"data/myfitnesspal").mkdir(exist_ok=True, parents=True)
@@ -59,7 +63,7 @@ def process_myfitnesspal():
 			}
 			food_rows.append(row)
 	df = pd.DataFrame(food_rows)
-	df.to_csv(basepath/"data/myfitnesspal/processed/myfitnesspal_meals.csv", index=False)
+	df.to_csv(basepath/"data/raw/myfitnesspal_meals.csv", index=False)
 
 	user_rows = []
 	for entry in entries:
@@ -72,7 +76,7 @@ def process_myfitnesspal():
 		}
 		user_rows.append(row)
 	df = pd.DataFrame(user_rows)
-	df.to_csv(basepath/"data/myfitnesspal/processed/myfitnesspal_goals.csv", index=False)
+	df.to_csv(basepath/"data/raw/myfitnesspal_goals.csv", index=False)
 
 def process_food(food):
 	output = {x["name"].lower(): int(x["value"].replace(",", "")) for x in food["nutritions"]}
@@ -101,7 +105,213 @@ def parse_food_name(name):
 		return parts[0], parts[1], None, serving_size
 	else:
 		return parts[0], parts[1], parts[2], serving_size
-	
+
+def count_stable_periods_and_points(data, threshold=10, min_length_percent=0.1):
+    data = data.dropna()
+    min_length = round(len(data) * min_length_percent)
+    num_stable_periods = 0
+    start = 0
+    stable_indicies = []
+
+    while start < len(data):
+        end = start
+        while end < len(data) - 1 and abs(data.iloc[end + 1] - data.iloc[start]) <= threshold:
+            end += 1
+        if end - start + 1 >= min_length:
+            num_stable_periods += 1
+            stable_indicies.extend(range(start, end + 1))
+        start = end + 1
+
+    return num_stable_periods,stable_indicies
+
+def process_cohorts(goals_df, ID_list):
+
+    # Create empty cohort lists
+    manual_goal_no_change = []
+    manual_goal_change = []
+    automatic_goal_change = []
+    automatic_goal_no_change = []
+
+    for user_id in ID_list:
+
+        # Filter data for the current person_id
+        person_data = goals_df[goals_df['user_id'] == user_id]
+
+        # Manual Goal with no change
+        if np.std(person_data['goal_calories']) == 0: 
+            manual_goal_no_change.append(user_id)
+                
+        # Manual Goal with Change
+        num_stable_periods, stable_indicies = count_stable_periods_and_points(person_data['goal_calories'])
+        stable_percent = len(stable_indicies)/len(person_data['goal_calories'])
+            
+        if user_id not in manual_goal_no_change:
+            if num_stable_periods >= 2 and stable_percent > 0.5: 
+                manual_goal_change.append(user_id)
+            if num_stable_periods == 1 and stable_percent > .75:
+                manual_goal_change.append(user_id)
+            
+        # Automatic Goal with Change 
+        non_na_goal_calories = person_data['goal_calories'].dropna()
+        minima_indices = find_peaks(-non_na_goal_calories)[0]
+        local_minima_list = non_na_goal_calories.iloc[minima_indices].tolist()
+        local_minima_list = [x + 1e-6 if np.abs(x) < 1e-3 else x for x in local_minima_list]
+  
+        percentage_change = np.diff(local_minima_list)/local_minima_list[:-1]*100
+
+        exceed_threshold = np.abs(percentage_change) > 10 
+            
+        if any(exceed_threshold) and user_id not in manual_goal_change: 
+            automatic_goal_change.append(user_id)
+            
+        # Calorie goal Patterns Automatic with change
+        if user_id not in manual_goal_no_change and user_id not in automatic_goal_change and user_id not in manual_goal_change: 
+            automatic_goal_no_change.append(user_id)
+
+    file_path = 'data/cohorts/manual_goal_change_list.txt'
+    with open(file_path, 'w') as file: 
+        for person_id in manual_goal_change:
+            file.write(f"{person_id}\n")
+        print("Manual Goal w/ Change Cohort: ", str(len(manual_goal_change)), "(", str(np.round(100*len(manual_goal_change)/len(goals_df['user_id'].unique()), 2)), "%)")
+                
+    file_path = 'data/cohorts/manual_goal_no_change_list.txt'
+    with open(file_path, 'w') as file: 
+        for person_id in manual_goal_no_change:
+            file.write(f"{person_id}\n")
+        print("Manual Goal w/o Change Cohort: ", str(len(manual_goal_no_change)), "(", str(np.round(100*len(manual_goal_no_change)/len(goals_df['user_id'].unique()), 2)), "%)")
+                
+    file_path = 'data/cohorts/automatic_goal_no_change_list.txt'
+    with open(file_path, 'w') as file: 
+        for person_id in automatic_goal_no_change:
+            file.write(f"{person_id}\n")
+        print("Automatic Goal w/o Change Cohort: ", str(len(automatic_goal_no_change)), "(", str(np.round(100*len(automatic_goal_no_change)/len(goals_df['user_id'].unique()), 2)), "%)")
+                
+    file_path = 'data/cohorts/automatic_goal_change_list.txt'
+    with open(file_path, 'w') as file: 
+        for person_id in automatic_goal_change:
+            file.write(f"{person_id}\n")
+        print("Automatic Goal w Change Cohort: ", str(len(automatic_goal_change)), "(", str(np.round(100*len(automatic_goal_change)/len(goals_df['user_id'].unique()), 2)), "%)")
+
+    return 
+
+def standardize_nutrients(just_food, chunk_size=1000):
+    # Create a database of nutrients normalized per 100 calories
+    norm_food = pd.DataFrame({
+        'full_name': just_food['full_name'],
+        'calories': just_food['calories'],
+        'carbs/100cal': 100 * just_food['carbs'] / just_food['calories'],
+        'fat/100cal': 100 * just_food['fat'] / just_food['calories'],
+        'protein/100cal': 100 * just_food['protein'] / just_food['calories'],
+        'sodium/100cal': 100 * just_food['sodium'] / just_food['calories'],
+        'sugar/100cal': 100 * just_food['sugar'] / just_food['calories']
+    })
+
+    # Create new dataframe with average nutrients across identical food names
+    avg_nuts = norm_food.groupby('full_name').mean().reset_index()
+
+    nutrients = ['carbs/100cal', 'fat/100cal', 'protein/100cal', 'sodium/100cal', 'sugar/100cal']
+    
+    print("Precomputing value counts...")
+    value_counts = {}
+    for col in tqdm(['serving_size', 'food_name', 'brand', 'flavor'], desc="Columns"):
+        def safe_mode(x):
+            counts = x.value_counts()
+            return counts.index[0] if not counts.empty else np.nan
+        
+        value_counts[col] = just_food.groupby('full_name')[col].apply(safe_mode)
+    
+    print("Adding precomputed values to avg_nuts...")
+    for col, counts in value_counts.items():
+        avg_nuts[col] = avg_nuts['full_name'].map(counts)
+    
+    print("Initializing columns for best nutrients...")
+    for nut in nutrients:
+        avg_nuts[f'best{nut}'] = np.nan
+    
+    def process_group(group, name, avg_row):
+        if group[nutrients].nunique().eq(1).all():
+            food_ref = group.iloc[0][nutrients]
+        else:
+            dists = ((group[nutrients] - avg_row[nutrients]) / avg_row[nutrients]).abs().sum(axis=1)
+            food_ref = group.loc[dists.idxmin(), nutrients]
+        
+        calories = just_food[just_food['full_name'] == name]['calories'].value_counts().index[0]
+        return food_ref * (calories / 100)
+    
+    print("Processing groups in chunks...")
+    full_names = list(norm_food.groupby('full_name').groups.keys())
+    
+    for i in tqdm(range(0, len(full_names), chunk_size), desc="Chunks"):
+        chunk = full_names[i:i+chunk_size]
+        chunk_groups = {name: norm_food.groupby('full_name').get_group(name) for name in chunk}
+        
+        for name, group in chunk_groups.items():
+            avg_row = avg_nuts[avg_nuts['full_name'] == name].iloc[0]
+            best_nuts = process_group(group, name, avg_row)
+            
+            for nut in nutrients:
+                avg_nuts.loc[avg_nuts['full_name'] == name, f'best{nut}'] = best_nuts[nut]
+        
+        # Clear memory
+        del chunk_groups
+    
+    print("Finalizing best_nuts dataframe...", end=" ")
+    food_ref = avg_nuts.drop(columns=nutrients).dropna(how='any')
+    # Rename columns
+    food_ref = food_ref.rename(columns={
+        'bestcarbs/100cal': 'carbs', 
+        'bestfat/100cal': 'fat', 
+        'bestprotein/100cal': 'protein', 
+        'bestsodium/100cal': 'sodium',
+        'bestsugar/100cal': 'sugar'
+    })
+    # Rearrange columns
+    food_ref = food_ref[['full_name', 'food_name', 'brand', 'flavor', 'serving_size', 
+                         'calories', 'carbs', 'fat', 'protein', 'sodium', 'sugar']]
+    
+    print('Done.')
+    return food_ref
+
+def compile_standard_nuts():
+     # Read all csv files from reference folder
+    files = [f for f in (basepath/"data/ref").iterdir() if f.is_file() and f.suffix == '.csv']
+    files.sort()
+    temp_ref_df = pd.DataFrame()
+    for file in files:
+        if file != '/home/emmett/Projects/Precision Nutrition/IO-with-behavior-Change/data/ref/standard_nutrient_reference.csv':
+            print(file, end=": ")
+            ref_batch = pd.read_csv(file)
+            # Add to dataframe
+            print(len(ref_batch))
+            temp_ref_df = pd.concat([temp_ref_df, ref_batch], ignore_index=True)
+    print(len(temp_ref_df), "total food item references")
+    temp_ref_df = temp_ref_df.dropna(subset=['full_name']); temp_ref_df = temp_ref_df.drop_duplicates()
+    print(len(temp_ref_df), "food item references")
+    # Filter for just full_name with no duplicates
+    food_names = temp_ref_df['full_name']
+    print(str(len(temp_ref_df) - len(np.unique(food_names))), "duplicates to reprocess")
+    ref_df = temp_ref_df.drop_duplicates(subset='full_name')
+    print(len(ref_df))
+    # Get the list of full_names which are not in the reference dataframe (so they were duplicates and need to be reprocessed)
+    reprocess_full_names = list(set(temp_ref_df['full_name']) - set(ref_df['full_name']))
+    print(reprocess_full_names)
+    # Reprocess the full_names which were duplicates
+    reprocess_df = temp_ref_df[temp_ref_df['full_name'].isin(reprocess_full_names)]
+    reprocess_df = standardize_nutrients(reprocess_df)
+    
+    # Concatenate the reprocessed dataframe with the original reference dataframe
+    ref_df = pd.concat([ref_df, reprocess_df], ignore_index=True)
+    ref_df = ref_df.sort_values(by=['full_name'])
+    ref_df.to_csv(basepath/"data/ref/standard_nutrient_reference.csv", index=False)
+
+    return ref_df
+
+def standardize_meals(meals_df, ref_df):
+    
+    return meals_df
+     
+#### Data Exploration ####
+
 # Adjusted from Natalia's code:
 def calc_user_stats(user_id, goals_df, meals_df, stats_df):
 
@@ -226,6 +436,9 @@ def init_user(userID, userGoals, userMeals, print_stats=False):
     fig.legend(lines, labels, loc='upper center', ncol=3)
     plt.savefig("data/userAnalysis/user"+str(userID)+"/nutrientTrends.png"); plt.close()
 
+#### Inverse Optimization and Inverse Learning Models ####
+
+# Get the IO model parameters (A,b,X) from mfp dataframes
 def model_params(goals_df, meals_df, dates, UB_flex, LB_flex):
     meals_df = meals_df[meals_df.date.isin(dates)] 
     foods = meals_df["full_name"].unique()
@@ -284,8 +497,7 @@ def model_params(goals_df, meals_df, dates, UB_flex, LB_flex):
 
     return A, b, X, foods
 
-#### Inverse Optimization and Inverse Learning Models ####
-
+# Modular multi-space Inverse Optimization model
 def IO_M(A,b,x,myEnv,noiseType, diffType="None", diff =-999999, e_x_abs_max=-999999, e_A_abs_max=-999999,
          x_noise=False, A_noise=False, b_noise=False, c_u=False, y_u=False, x_bar_u=False, A_bar_u=False, b_bar_u=False, corner_u=False):
     
