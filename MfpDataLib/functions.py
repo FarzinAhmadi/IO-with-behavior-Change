@@ -408,6 +408,7 @@ def IO_M(A,b,x,myEnv,noiseType, diffType="None", diff =-999999, e_x_abs_max=-999
             mod.addConstr(gp.quicksum(c[k_c,j] * x_bar[k_x,j] for j in range(n)) == gp.quicksum(b_bar[k_b,i] * y[k_y,i] for i in range(m)))
             # Primal feasibility
             mod.addConstrs(gp.quicksum(A_bar[k_A,i,j] * x_bar[k_x,j] for j in range(n)) <= b_bar[k_b,i] for i in range(m))
+            mod.addConstrs(x_bar[k_x,j] >= 0 for j in range(n))
             # Dual feasibility
             mod.addConstrs(gp.quicksum(y[k_y,i] * A_bar[k_A,i,j] for i in range(m)) == c[k_c,j] for j in range(n))    
             # 1-Norm of c
@@ -421,7 +422,7 @@ def IO_M(A,b,x,myEnv,noiseType, diffType="None", diff =-999999, e_x_abs_max=-999
         # Optimize 
         mod.optimize()
         if mod.status == GRB.OPTIMAL:
-            # print('Optimal objective value = ', mod.ObjVal)
+            print('Optimal objective value = ', mod.ObjVal)
             c_vals = np.zeros(shape=(p,n))
             y_vals = np.zeros(shape=(p,m))
             x_bar_vals = np.zeros(shape=(p,n)); e_x_vals = np.zeros(shape=(p,n))
@@ -440,27 +441,20 @@ def IO_M(A,b,x,myEnv,noiseType, diffType="None", diff =-999999, e_x_abs_max=-999
                     x_bar_vals[k,j] = x_bar[k_x,j].X; e_x_vals[k,j] = e_x[k,j].X
             return {'feasible': True, 'obj': mod.ObjVal, 'c': c_vals, 'y': y_vals, 'x_bar': x_bar_vals, 'e_x': e_x_vals,
                     'A_bar': A_bar_vals, 'e_A': e_A_vals, 'b_bar': b_bar_vals, 'e_b': e_b_vals, 'rt': mod.Runtime}
-        else: print(mod.status); return {'feasible': False} 
+        else: print("Optimization ended with status ", mod.status); return {'feasible': False} 
 
 # Plot nutritional changes in recommendation vs observation
 def plt_rec_nuts(userID, userGoals, dates, A, b, X, d, day_ind, all_results, model_names):
     # Create the bar plot and set up formatting
-    plt.figure(figsize=(12, 6)); plt.grid(visible=True, axis='y'); plt.rcParams['font.size'] = 6
-    plt.rcParams.update({'font.size': 10})
-    # Set the width of each bar
-    bar_width = 0.25
-
+    plt.figure(figsize=(12, 6)); plt.grid(visible=True, axis='y'); plt.rcParams['font.size'] = 10
+    num_bars = len(all_results) + 1
+    bar_width = 1/(num_bars+1)
     # Set the positions of the bars on the x-axis
-    # TODO: Un-hard-code this to work for flexible number of models to compare
     nutrients = ["Calories", "Carbs", "Fat", "Protein", "Sodium", "Sugar"]
-    r2 = range(len(nutrients))
-    r1 = [x - bar_width for x in r2]
-    r3 = [x + bar_width for x in r2]
-
-    positions = [r1, r2, r3]
-    print(positions[0])
-    print(positions[1])
-    print(positions[-1])
+    start_pos = range(len(nutrients)) - 0.5*np.ones(len(nutrients)) + bar_width*np.ones(len(nutrients))
+    positions = [start_pos]
+    for i in range(len(all_results)):   
+        positions.append([x + (i+1)*bar_width for x in start_pos])
 
     # Get actual original behavior amounts
     obs_cals = gp.quicksum(X[d,i]*A[0,i] for i in range(X.shape[1])).getValue()
@@ -478,7 +472,7 @@ def plt_rec_nuts(userID, userGoals, dates, A, b, X, d, day_ind, all_results, mod
     obs_df = pd.DataFrame({"Day": d, "Calories": obs_cals, "Carbs": obs_carbs, "Fat": obs_fat, "Protein": obs_protein, "Sodium": obs_sodium, "Sugar": obs_sugar}, index=[0])
     goals_df = pd.DataFrame({"Day": d, "Calories": goal_cals, "Carbs": goal_carbs, "Fat": goal_fat, "Protein": goal_protein, "Sodium": goal_sodium, "Sugar": goal_sugar}, index=[0])
     # Plot bars for original behavior
-    container = plt.bar(positions[0], 100*(obs_df.iloc[0,1:] - goals_df.iloc[0,1:])/goals_df.iloc[0,1:], width=bar_width, label='Original Behavior', color="cornflowerblue")
+    container = plt.bar(positions[0], 100*(obs_df.iloc[0,1:] - goals_df.iloc[0,1:])/goals_df.iloc[0,1:], width=bar_width, label='Original Behavior')
     plt.bar_label(container, labels=obs_df.iloc[0,1:].astype(int))
 
     # Get recommended amounts for each model:
@@ -516,8 +510,9 @@ def plt_rec_nuts(userID, userGoals, dates, A, b, X, d, day_ind, all_results, mod
         if np.isnan(goals_df.iloc[0][nutrient]): nutrient_goals.append("None")
         else: nutrient_goals.append(str(round(goals_df.iloc[0][nutrient])))
         lower_bound, upper_bound = acceptable_ranges[nutrient]
-        print(positions[0][i]); print(positions[1][i])
-        plt.axhspan(lower_bound, upper_bound, facecolor='g', alpha=0.2, xmin=i / len(nutrients), xmax=(i + 1) / len(nutrients))
+        plt.axvline(x=i-0.5, color='k', linestyle='--', linewidth=0.5)
+        plt.axvline(x=i+0.5, color='k', linestyle='--', linewidth=0.5)
+        plt.axhspan(lower_bound, upper_bound, facecolor='g', alpha=0.2, xmin=i/6, xmax=(i+1)/6)
 
     # Add labels and title
     plt.xlabel('Nutrients')
@@ -526,7 +521,84 @@ def plt_rec_nuts(userID, userGoals, dates, A, b, X, d, day_ind, all_results, mod
     nutrient_labels = ["Calories ("+nutrient_goals[0]+")", "Carbs ("+nutrient_goals[1]+")", "Fat ("+nutrient_goals[2]+")", 
                        "Protein ("+nutrient_goals[3]+")", "Sodium ("+nutrient_goals[4]+")", "Sugar ("+nutrient_goals[5]+")"]
     plt.xticks([r  for r in range(len(nutrients))], nutrient_labels); # plt.tick_params(axis='x', labelsize=12)
+    plt.xlim(-0.5, len(nutrients)-0.5)
     plt.legend(bbox_to_anchor=(0.75, 1.15), loc="upper left")
     plt.savefig("data/User"+str(userID)+"_Day_"+str(d+1)+"_Nutrients.png")
     
     # plt.close()
+    return
+
+# Plot food portion changes in recommendation vs observation
+def plt_rec_foods(userID, X, foods, d, all_results, model_names):
+    # Get observed behavior
+    obs = X[d].T!=0
+    dayResults = {"Observation": X[d][obs]}
+    rec_foods = foods[obs]
+    # Get all foods recommended across all models (and the original observation)
+    for i in range(len(all_results)):
+        rec = all_results[i]['x_bar'][d].T!=0
+        rec_foods = np.append(rec_foods, foods[rec])
+    # Get boolean array for foods in rec_foods
+    rec_foods = np.unique(np.array(rec_foods))
+    food_bool = np.isin(foods, rec_foods)
+
+    dayResults = {"Observation": X[d][food_bool]}
+    for i in range(len(all_results)):
+         dayResults[model_names[i]] = all_results[i]['x_bar'][d][food_bool]
+         
+    model_names.insert(0, "Observation")
+    
+    # Create the bar plot and set up formatting
+    plt.figure(figsize=(12, 12)); plt.grid(visible=True, axis='y'); plt.rcParams['font.size'] = 6
+    num_bars = len(all_results) + 1
+    bar_width = 1/(num_bars+1)
+    start_pos = range(len(rec_foods)) - 0.5*np.ones(len(rec_foods)) + bar_width*np.ones(len(rec_foods))
+    positions = [start_pos]
+    for i in range(len(all_results)):   
+        positions.append([x + (i+1)*bar_width for x in start_pos])
+    
+    # Create the bar plot
+    for i in range(len(dayResults)):
+        plt.bar(positions[i], dayResults[model_names[i]], width=bar_width, label=model_names[i])
+
+    # Add labels and title
+    plt.xlabel('Food Groups')
+    plt.ylabel('Values')
+    plt.title('Day ' + str(d+1) + ' Food Groups vs. Values')
+    plt.xticks([r for r in range(len(rec_foods))], rec_foods, rotation=90)
+    plt.legend(bbox_to_anchor=(0.75, 1.2), loc="upper left")
+    # Adjust layout 
+    plt.subplots_adjust(left=0.1, right=0.9, bottom=0.6, top=0.925)
+    # plt.tight_layout()
+    
+    plt.savefig("data/User"+str(userID)+"_Day_"+str(d+1)+"_Foods.png")
+    # plt.close()
+    return 
+
+# Plot the stepwise adjustement recommendations from IL model(s)
+def plt_stepwise(filepath):
+    # Data from the dictionary
+    data = pd.read_csv(filepath)
+    food_items = list(data.columns)
+    food_items_cleaned = [item.split(',')[0] for item in food_items]
+
+    # Convert the data into a format suitable for a heatmap
+    heatmap_data = np.array([data.iloc[i] for i in range(len(data))])
+
+    # Create a heatmap
+    plt.figure(figsize=(22, 8))
+    plt.rcParams.update({'font.size': 14})
+    sns.heatmap(heatmap_data, annot=True, cmap='coolwarm', xticklabels=food_items_cleaned, 
+                yticklabels=['Original Diet', 'First Adjustement', 'Second Adjustement', 
+                            'Third Adjustement', 'Fourth Adjustement', 'Fifth Adjustement'])
+
+    # Add labels and title
+    plt.title('Low-Carb Day 1: Servings Recommended via Stepwise Adjustment')
+    plt.xlabel('Food Items')
+
+    # Show the plot
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()  # Adjust layout to fit everything
+    plt.show()
+    return 
